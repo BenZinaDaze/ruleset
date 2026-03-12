@@ -1,0 +1,5 @@
+rules:
+  name: mihomo-ruleset
+  url:
+    - "https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/ai.list"
+    - "https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/netflix.list"

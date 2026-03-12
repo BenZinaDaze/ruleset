@@ -1,0 +1,101 @@
+name: Publish Release Assets
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rule.yaml"
+      - "convert_rule_list.py"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-release-assets-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate converter script
+        run: python -m py_compile convert_rule_list.py
+
+      - name: Generate release assets
+        id: generate
+        run: |
+          metadata_path="$(python3 convert_rule_list.py -c rule.yaml)"
+          echo "metadata_path=$metadata_path" >> "$GITHUB_OUTPUT"
+
+      - name: Read release metadata
+        id: metadata
+        run: |
+          python3 - "${{ steps.generate.outputs.metadata_path }}" >> "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          metadata_path = sys.argv[1]
+          with open(metadata_path, encoding="utf-8") as handle:
+              metadata = json.load(handle)
+
+          assets = "\n".join(metadata["asset_paths"])
+          sources = "\n".join(metadata["sources"])
+          print(f"release_name={metadata['release_name']}")
+          print(f"generated_at={metadata['generated_at']}")
+          print("sources<<EOF")
+          print(sources)
+          print("EOF")
+          print("asset_paths<<EOF")
+          print(assets)
+          print("EOF")
+          PY
+
+      - name: Build release notes
+        run: |
+          cat > release-notes.md <<EOF
+          Last updated: ${{ steps.metadata.outputs.generated_at }}
+
+          Update sources:
+          ${{ steps.metadata.outputs.sources }}
+          EOF
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ steps.metadata.outputs.release_name }}
+        run: |
+          if ! gh release view "$RELEASE_NAME" >/dev/null 2>&1; then
+            gh release create "$RELEASE_NAME" \
+              --title "$RELEASE_NAME" \
+              --notes-file release-notes.md
+          fi
+
+      - name: Update release description
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ steps.metadata.outputs.release_name }}
+        run: gh release edit "$RELEASE_NAME" --notes-file release-notes.md
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ steps.metadata.outputs.release_name }}
+          ASSET_PATHS: ${{ steps.metadata.outputs.asset_paths }}
+        run: |
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            gh release upload "$RELEASE_NAME" "$asset" --clobber
+          done <<'EOF'
+          ${{ steps.metadata.outputs.asset_paths }}
+          EOF
