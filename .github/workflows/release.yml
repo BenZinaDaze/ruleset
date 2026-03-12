@@ -2,7 +2,7 @@ name: Publish Release Assets
 
 on:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "0 */24 * * *"
   push:
     branches:
       - main
