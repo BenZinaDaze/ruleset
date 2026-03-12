@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
+
+
+CST = timezone(timedelta(hours=8))
+
+
+def format_timestamp() -> str:
+    return datetime.now(CST).isoformat(sep=" ", timespec="seconds")
 
 
 def convert_line(line: str) -> str | None:
@@ -118,7 +125,7 @@ def write_output(
             output_path = input_path.with_name(f"{input_path.stem}_rules.list")
 
     converted_lines = build_output(load_input_lines(input_value))
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = format_timestamp()
     header = [f"# Generated at: {generated_at}"]
     if release_name:
         header.append(f"# Release: {release_name}")
@@ -145,7 +152,7 @@ def write_release_metadata(
     metadata_path = output_dir / "release-metadata.json"
     payload = {
         "release_name": release_name,
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": format_timestamp(),
         "config_path": config_path,
         "sources": sources,
         "asset_paths": [str(path) for path in asset_paths],
