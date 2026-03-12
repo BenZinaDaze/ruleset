@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -12,8 +13,18 @@ from urllib.request import urlopen
 CST = timezone(timedelta(hours=8))
 
 
+@dataclass(frozen=True)
+class ReleaseConfig:
+    name: str
+    urls: list[str]
+
+
 def format_timestamp() -> str:
     return datetime.now(CST).isoformat(sep=" ", timespec="seconds")
+
+
+def is_http_url(value: str) -> bool:
+    return urlparse(value).scheme in {"http", "https"}
 
 
 def convert_line(line: str) -> str | None:
@@ -28,25 +39,30 @@ def convert_line(line: str) -> str | None:
 
 
 def build_output(lines: list[str]) -> list[str]:
-    output: list[str] = []
-    for raw_line in lines:
-        converted = convert_line(raw_line)
-        if converted is not None:
-            output.append(converted)
-    return output
+    return [
+        converted
+        for raw_line in lines
+        if (converted := convert_line(raw_line)) is not None
+    ]
+
+
+def read_remote_lines(source: str) -> list[str]:
+    with urlopen(source) as response:
+        content = response.read().decode("utf-8")
+    return content.splitlines()
+
+
+def read_local_lines(source: str) -> list[str]:
+    return Path(source).read_text(encoding="utf-8").splitlines()
 
 
 def load_input_lines(input_value: str) -> list[str]:
-    parsed = urlparse(input_value)
-    if parsed.scheme in {"http", "https"}:
-        with urlopen(input_value) as response:
-            content = response.read().decode("utf-8")
-        return content.splitlines()
-
-    return Path(input_value).read_text(encoding="utf-8").splitlines()
+    if is_http_url(input_value):
+        return read_remote_lines(input_value)
+    return read_local_lines(input_value)
 
 
-def infer_output_name(input_name: str, source_label: str | None) -> str:
+def infer_output_name(input_name: str, source_label: str | None = None) -> str:
     if source_label:
         parsed = urlparse(source_label)
         candidate = Path(parsed.path).name
@@ -55,7 +71,7 @@ def infer_output_name(input_name: str, source_label: str | None) -> str:
     return f"{Path(input_name).stem}_rules.list"
 
 
-def load_config(config_path: str) -> tuple[str | None, list[str]]:
+def load_yaml_config(config_path: str) -> ReleaseConfig:
     content = Path(config_path).read_text(encoding="utf-8")
     try:
         import yaml  # type: ignore
@@ -66,34 +82,42 @@ def load_config(config_path: str) -> tuple[str | None, list[str]]:
         urls = rules.get("url", [])
         if not isinstance(urls, list):
             raise ValueError("'rules.url' must be a list")
-        return name, [str(item) for item in urls]
+        if not name:
+            raise ValueError("config does not contain rules.name")
+        return ReleaseConfig(name=str(name), urls=[str(item) for item in urls])
     except ModuleNotFoundError:
-        name: str | None = None
-        urls: list[str] = []
-        in_rules = False
-        in_url = False
+        return load_fallback_config(content)
 
-        for raw_line in content.splitlines():
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if stripped == "rules:":
-                in_rules = True
-                in_url = False
-                continue
-            if not in_rules:
-                continue
-            if stripped.startswith("name:"):
-                name = stripped.split(":", 1)[1].strip().strip("\"'")
-                in_url = False
-                continue
-            if stripped.startswith("url:"):
-                in_url = True
-                continue
-            if in_url and stripped.startswith("-"):
-                urls.append(stripped[1:].strip().strip("\"'"))
 
-        return name, urls
+def load_fallback_config(content: str) -> ReleaseConfig:
+    release_name: str | None = None
+    urls: list[str] = []
+    in_rules_section = False
+    in_url_section = False
+
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "rules:":
+            in_rules_section = True
+            in_url_section = False
+            continue
+        if not in_rules_section:
+            continue
+        if stripped.startswith("name:"):
+            release_name = stripped.split(":", 1)[1].strip().strip("\"'")
+            in_url_section = False
+            continue
+        if stripped.startswith("url:"):
+            in_url_section = True
+            continue
+        if in_url_section and stripped.startswith("-"):
+            urls.append(stripped[1:].strip().strip("\"'"))
+
+    if not release_name:
+        raise ValueError("config does not contain rules.name")
+    return ReleaseConfig(name=release_name, urls=urls)
 
 
 def ensure_unique_asset_names(inputs: list[str]) -> None:
@@ -109,34 +133,46 @@ def ensure_unique_asset_names(inputs: list[str]) -> None:
         raise ValueError(f"duplicate asset names detected: {names}")
 
 
+def resolve_output_path(
+    input_value: str,
+    output_name: str | None = None,
+    output_dir: Path | None = None,
+) -> Path:
+    inferred_name = output_name or infer_output_name(input_value, input_value)
+    output_path = (output_dir / inferred_name) if output_dir else Path(inferred_name)
+
+    if is_http_url(input_value):
+        return output_path
+
+    input_path = Path(input_value)
+    if output_path.resolve() == input_path.resolve():
+        return input_path.with_name(f"{input_path.stem}_rules.list")
+    return output_path
+
+
+def build_header_lines(source: str, release_name: str | None = None) -> list[str]:
+    header = [f"# Generated at: {format_timestamp()}"]
+    if release_name:
+        header.append(f"# Release: {release_name}")
+    header.extend(
+        [
+            f"# Source: {source}",
+            "",
+        ]
+    )
+    return header
+
+
 def write_output(
     input_value: str,
     output_name: str | None = None,
     release_name: str | None = None,
     output_dir: Path | None = None,
 ) -> Path:
-    inferred_name = output_name or infer_output_name(input_value, input_value)
-    output_path = (output_dir / inferred_name) if output_dir else Path(inferred_name)
-
-    parsed_input = urlparse(input_value)
-    if parsed_input.scheme not in {"http", "https"}:
-        input_path = Path(input_value)
-        if output_path.resolve() == input_path.resolve():
-            output_path = input_path.with_name(f"{input_path.stem}_rules.list")
-
+    output_path = resolve_output_path(input_value, output_name, output_dir)
     converted_lines = build_output(load_input_lines(input_value))
-    generated_at = format_timestamp()
-    header = [f"# Generated at: {generated_at}"]
-    if release_name:
-        header.append(f"# Release: {release_name}")
-    header.extend(
-        [
-            f"# Source: {input_value}",
-            "",
-        ]
-    )
     output_path.write_text(
-        "\n".join(header + converted_lines) + "\n",
+        "\n".join(build_header_lines(input_value, release_name) + converted_lines) + "\n",
         encoding="utf-8",
     )
     return output_path
@@ -202,28 +238,26 @@ def main() -> None:
         parser.error("--input and --config cannot be used together")
 
     if args.config_path:
-        release_name, inputs = load_config(args.config_path)
-        if not inputs:
+        config = load_yaml_config(args.config_path)
+        if not config.urls:
             parser.error("config does not contain any sources in rules.url")
-        if not release_name:
-            parser.error("config does not contain rules.name")
         if args.output:
             parser.error("output cannot be used with --config")
-        ensure_unique_asset_names(inputs)
-        release_dir = Path(args.dist_dir) / release_name
+        ensure_unique_asset_names(config.urls)
+        release_dir = Path(args.dist_dir) / config.name
         release_dir.mkdir(parents=True, exist_ok=True)
         asset_paths = [
             write_output(
                 input_value,
-                release_name=release_name,
+                release_name=config.name,
                 output_dir=release_dir,
             )
-            for input_value in inputs
+            for input_value in config.urls
         ]
         metadata_path = write_release_metadata(
-            release_name=release_name,
+            release_name=config.name,
             config_path=args.config_path,
-            sources=inputs,
+            sources=config.urls,
             asset_paths=asset_paths,
             output_dir=release_dir,
         )
